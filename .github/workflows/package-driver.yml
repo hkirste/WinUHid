@@ -1,0 +1,146 @@
+name: Package WinUHid Driver
+
+on:
+  push:
+    branches:
+      - main
+    tags:
+      - 'v*'
+  pull_request:
+    branches:
+      - main
+  workflow_dispatch:
+
+jobs:
+  package:
+    name: Package Driver (${{ matrix.platform }})
+    runs-on: windows-latest
+
+    strategy:
+      fail-fast: false
+      matrix:
+        platform: [x64, ARM64]
+        include:
+          - platform: x64
+            arch: amd64
+          - platform: ARM64
+            arch: arm64
+
+    steps:
+    - name: Checkout repository
+      uses: actions/checkout@v4
+
+    - name: Add MSBuild to PATH
+      uses: microsoft/setup-msbuild@v2
+      with:
+        msbuild-architecture: x64
+
+    - name: Install WDK
+      shell: pwsh
+      run: |
+        # Install the Windows Driver Kit via winget
+        winget install --source winget --exact --id Microsoft.WindowsWDK.10.0.26100 --accept-source-agreements --accept-package-agreements --silent
+
+        # Install the WDK VS component (registers the WindowsUserModeDriver10.0 toolset)
+        $vsWhere = "${env:ProgramFiles(x86)}\Microsoft Visual Studio\Installer\vswhere.exe"
+        $vsPath = & $vsWhere -latest -property installationPath
+        $vsInstaller = "${env:ProgramFiles(x86)}\Microsoft Visual Studio\Installer\setup.exe"
+        & $vsInstaller modify --installPath $vsPath --add Microsoft.VisualStudio.Component.WDK --quiet --norestart
+
+    - name: Restore NuGet packages
+      run: msbuild -t:restore -p:RestorePackagesConfig=true
+
+    - name: Setup vcpkg
+      uses: lukka/run-vcpkg@v11
+
+    - name: Install vcpkg MSBuild integration
+      run: ${{ github.workspace }}/vcpkg/vcpkg.exe integrate install
+
+    - name: Build driver
+      run: msbuild "WinUHid Driver/WinUHid Driver.vcxproj" /p:Configuration=Release /p:Platform=${{ matrix.platform }} /m /verbosity:minimal
+
+    - name: Find stampinf
+      id: stampinf
+      shell: pwsh
+      run: |
+        $stampinf = Get-ChildItem "C:\Program Files (x86)\Windows Kits\10\bin\*\x86\stampinf.exe" -Recurse |
+          Sort-Object FullName -Descending | Select-Object -First 1
+        echo "path=$($stampinf.FullName)" >> $env:GITHUB_OUTPUT
+
+    - name: Process INF with stampinf
+      shell: pwsh
+      run: |
+        $driverDir = "WinUHid Driver"
+        $buildDir = "$driverDir\build\Release\${{ matrix.platform }}"
+
+        # Copy INF to build directory (convert from UTF-16 if needed)
+        $infContent = [System.IO.File]::ReadAllText("$driverDir\WinUHidDriver.inf", [System.Text.Encoding]::Unicode)
+        [System.IO.File]::WriteAllText("$buildDir\WinUHidDriver.inf", $infContent, [System.Text.Encoding]::ASCII)
+
+        # Run stampinf to expand macros
+        & "${{ steps.stampinf.outputs.path }}" -f "$buildDir\WinUHidDriver.inf" -a ${{ matrix.arch }} -u 2.33.0 -d * -v *
+
+        # Verify macros are expanded
+        $content = Get-Content "$buildDir\WinUHidDriver.inf" -Raw
+        if ($content -match '\$ARCH\$' -or $content -match '\$UMDFVERSION\$') {
+          throw "stampinf failed to expand all macros"
+        }
+
+    - name: Rename driver DLL
+      shell: pwsh
+      run: |
+        $buildDir = "WinUHid Driver\build\Release\${{ matrix.platform }}"
+        if (Test-Path "$buildDir\WinUHid Driver.dll") {
+          Move-Item "$buildDir\WinUHid Driver.dll" "$buildDir\WinUHidDriver.dll"
+        }
+
+    - name: Create catalog
+      shell: pwsh
+      run: |
+        $buildDir = "WinUHid Driver\build\Release\${{ matrix.platform }}"
+        New-FileCatalog -Path $buildDir -CatalogFilePath "$buildDir\WinUHidDriver.cat" -CatalogVersion 2.0
+
+    # Signing step - uncomment and configure when a code signing certificate is available
+    # - name: Sign driver
+    #   shell: pwsh
+    #   run: |
+    #     $buildDir = "WinUHid Driver\build\Release\${{ matrix.platform }}"
+    #     $signtool = (Get-ChildItem "C:\Program Files (x86)\Windows Kits\10\bin\*\x64\signtool.exe" -Recurse |
+    #       Sort-Object FullName -Descending | Select-Object -First 1).FullName
+    #     & $signtool sign /fd sha256 /td sha256 /tr http://timestamp.digicert.com <signing_args> "$buildDir\WinUHidDriver.dll"
+    #     & $signtool sign /fd sha256 /td sha256 /tr http://timestamp.digicert.com <signing_args> "$buildDir\WinUHidDriver.cat"
+
+    - name: Upload driver package
+      uses: actions/upload-artifact@v4
+      with:
+        name: WinUHidDriver-${{ matrix.platform }}
+        path: |
+          WinUHid Driver/build/Release/${{ matrix.platform }}/WinUHidDriver.dll
+          WinUHid Driver/build/Release/${{ matrix.platform }}/WinUHidDriver.inf
+          WinUHid Driver/build/Release/${{ matrix.platform }}/WinUHidDriver.cat
+
+  # Create a GitHub release when a tag is pushed
+  release:
+    name: Create Release
+    needs: package
+    if: startsWith(github.ref, 'refs/tags/v')
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+
+    steps:
+    - name: Download all artifacts
+      uses: actions/download-artifact@v4
+
+    - name: Package for release
+      run: |
+        for dir in WinUHidDriver-*/; do
+          platform=$(basename "$dir" | sed 's/WinUHidDriver-//')
+          (cd "$dir" && zip -r "../WinUHidDriver-${platform}.zip" .)
+        done
+
+    - name: Create release
+      uses: softprops/action-gh-release@v2
+      with:
+        files: WinUHidDriver-*.zip
+        generate_release_notes: true
