@@ -57,5 +57,5 @@ jobs:
       with:
         name: WinUHid-${{ matrix.configuration }}-${{ matrix.platform }}
         path: |
-          build/${{ matrix.configuration }}/${{ matrix.platform }}/WinUHid.*
+          build/${{ matrix.configuration }}/${{ matrix.platform }}/
           WinUHid/WinUHid.h
