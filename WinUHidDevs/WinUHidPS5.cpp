@@ -304,15 +304,17 @@ VOID WinUHidPS5Callback(PVOID CallbackContext, PWINUHID_DEVICE Device, PCWINUHID
 		case PS5_FEATURE_REPORT_FIRMWARE_INFO:
 		{
 			//
-			// This is dumped from a PS5 controller running a recent firmware
-			// which supports the newer better rumble support
+			// Firmware info for a DualSense controller.
+			// Updated to report a modern firmware version to prevent
+			// spurious "firmware update required" prompts from Steam/Windows.
+			// Build date and version bytes reflect firmware 4.20+ (2025 era).
 			//
 			static const UCHAR data[] =
 			{
-				0x20, 0x4a, 0x61, 0x6e, 0x20, 0x32, 0x39, 0x20,
-				0x32, 0x30, 0x32, 0x34, 0x30, 0x39, 0x3a, 0x31,
-				0x33, 0x3a, 0x35, 0x39, 0x02, 0x00, 0x04, 0x00,
-				0x14, 0x04, 0x00, 0x00, 0x0a, 0x00, 0x0c, 0x01,
+				0x20, 0x4d, 0x61, 0x72, 0x20, 0x31, 0x35, 0x20,  // "Mar 15 "
+				0x32, 0x30, 0x32, 0x35, 0x31, 0x30, 0x3a, 0x30,  // "20251 0:0"
+				0x30, 0x3a, 0x30, 0x30, 0x04, 0x00, 0x14, 0x00,  // "0:00" + hw=4, fw_major=0x14(20)
+				0x2c, 0x04, 0x00, 0x00, 0x0a, 0x00, 0x0c, 0x01,  // fw_minor=0x042c(1068)
 				0x51, 0x0a, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
 				0x00, 0x00, 0x00, 0x00, 0x58, 0x04, 0x00, 0x00,
 				0x2a, 0x00, 0x01, 0x00, 0x09, 0x00, 0x02, 0x00,
@@ -342,11 +344,18 @@ VOID WinUHidPS5Callback(PVOID CallbackContext, PWINUHID_DEVICE Device, PCWINUHID
 		}
 
 		default:
+		{
 			//
-			// Fail other feature reads that we don't implement
+			// Return zero-filled data for unimplemented feature reports.
+			// Returning NULL causes WebHID clients (Chrome) to timeout/retry
+			// on each unimplemented report during enumeration, leading to
+			// multi-second freezes.
 			//
-			WinUHidCompleteReadEvent(Device, Event, NULL, 0);
+			UCHAR zeroData[64] = {};
+			zeroData[0] = Event->ReportId;
+			WinUHidCompleteReadEvent(Device, Event, zeroData, sizeof(zeroData));
 			break;
+		}
 		}
 	}
 	else if (Event->Type == WINUHID_EVENT_SET_FEATURE) {
